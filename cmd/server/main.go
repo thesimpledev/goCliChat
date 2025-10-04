@@ -16,11 +16,12 @@ import (
 )
 
 type connection struct {
+	userName  string
 	channel   chan []byte
 	publicKey string
 }
 
-type connections map[string]connection
+type connections map[string]*connection
 
 type messageContainer struct {
 	userName  []byte
@@ -69,7 +70,7 @@ func main() {
 }
 
 func (app *application) handleConnection(conn net.Conn) {
-	var userName string
+	var connection *connection
 	defer conn.Close()
 	tcpConn := conn.(*net.TCPConn)
 	tcpConn.SetKeepAlive(true)
@@ -83,10 +84,12 @@ func (app *application) handleConnection(conn net.Conn) {
 			if err != io.EOF {
 				app.logger.Error("read error", "err", err)
 			}
-			if userName != "" {
-				leaveMessage := fmt.Appendf(nil, "*** %s has left the chat", userName)
-				app.broadcast(leaveMessage)
-				close(app.connections[userName].channel)
+			if connection != nil {
+				leaveMessage := fmt.Appendf(nil, "*** %s has left the chat", connection.userName)
+				app.broadcast(connection.userName, leaveMessage)
+				app.mu.Lock()
+				close(connection.channel)
+				app.mu.Unlock()
 			}
 			return
 		}
@@ -112,18 +115,32 @@ func (app *application) handleConnection(conn net.Conn) {
 
 		switch command {
 		case protocol.CMD_CONNECTION:
-			userName = string(message.userName)
-			app.registerConnection(userName)
+			userName := string(message.userName)
+			connection = app.registerConnection(userName)
 			joinMessage := fmt.Appendf(nil, "*** %s joined the chat\n", message.userName)
-			app.broadcast(joinMessage)
+			app.broadcast(userName, joinMessage)
+			go app.writeOutgoing(connection, conn)
 		case protocol.CMD_REGISTER:
 			// TODO: handler registeration
 		case protocol.CMD_CHAT:
+			if connection == nil {
+				app.logger.Error("chat attempted before connection established")
+				continue
+			}
 			chatMessage := fmt.Sprintf("%s: %s", message.userName, message.message)
-			app.broadcast([]byte(chatMessage))
+			app.broadcast(connection.userName, []byte(chatMessage))
 		case protocol.CMD_ROTATE_KEY:
-			// TODO: Handle Key Rotation
+			if connection == nil {
+				app.logger.Error("chat attempted before connection established")
+				continue
+			}
+			// TODO: Handle Key Rotation/clos
 		case protocol.CMD_DELETE_ME:
+			if connection == nil {
+				app.logger.Error("chat attempted before connection established")
+				continue
+			}
+
 			// TODO: Handle Account Deletion
 		default:
 			app.logger.Error("unknown command", "command", command)
@@ -132,11 +149,45 @@ func (app *application) handleConnection(conn net.Conn) {
 
 }
 
+func (app *application) writeOutgoing(connection *connection, conn net.Conn) {
+	for msg := range connection.channel {
+		_, err := conn.Write(msg)
+		if err != nil {
+			app.logger.Error("write error", "err", err)
+			return
+		}
+	}
+}
+
+func (app *application) broadcast(sender string, message []byte) {
+	app.mu.RLock()
+	defer app.mu.RUnlock()
+
+	for _, conn := range app.connections {
+		if conn.userName == sender {
+			continue
+		}
+
+		app.queueMessage(conn.channel, conn.userName, message)
+
+	}
+}
+
+func (app *application) queueMessage(channel chan []byte, userName string, msg []byte) {
+	select {
+	case channel <- msg:
+	default:
+		app.logger.Error("unable to send message to channel", "channel", userName)
+	}
+}
+
 func (app *application) decryptFrame(frame []byte) ([]byte, error) {
+	// TODO: decrypt logic
 	return frame, nil
 }
 
 func (app *application) unpackFrame(packedFrame []byte) (*messageContainer, error) {
+	// TODO: Need to finish setting up the packedFrame parsing
 	userName := packedFrame[:]
 	message := packedFrame[:]
 	signature := packedFrame[:]
@@ -148,12 +199,10 @@ func (app *application) unpackFrame(packedFrame []byte) (*messageContainer, erro
 	return mc, nil
 }
 
-func (app *application) broadcast(message []byte) {
-
-}
-func (app *application) registerConnection(userName string) {
+func (app *application) registerConnection(userName string) *connection {
 	connection := &connection{
-		channel: make(chan []byte),
+		userName: userName,
+		channel:  make(chan []byte, 10),
 	}
 	app.mu.Lock()
 	defer app.mu.Unlock()
@@ -161,6 +210,8 @@ func (app *application) registerConnection(userName string) {
 	if old, exists := app.connections[userName]; exists {
 		close(old.channel)
 	}
-	app.connections[userName] = *connection
+	app.connections[userName] = connection
+
+	return connection
 
 }
