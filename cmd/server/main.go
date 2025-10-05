@@ -23,12 +23,6 @@ type connection struct {
 
 type connections map[string]*connection
 
-type messageContainer struct {
-	userName  []byte
-	signature []byte
-	message   []byte
-}
-
 type application struct {
 	ctx         context.Context
 	port        int
@@ -59,6 +53,8 @@ func main() {
 	app.logger.Info("Chat Server Started and Listening", "port", app.port)
 
 	for {
+		// TODO: Use Context to gracefully exit
+		// TODO: Pass child contexts into each handleConnection
 		conn, err := ln.Accept()
 		if err != nil {
 			app.logger.Error("failed to accept connection", "err", err)
@@ -107,7 +103,7 @@ func (app *application) handleConnection(conn net.Conn) {
 			continue
 		}
 
-		message, err := app.unpackFrame(frame)
+		message, err := protocol.UnpackFrame(frame)
 		if err != nil {
 			app.logger.Error("failedto unpack frame", "err", err)
 			continue
@@ -115,9 +111,9 @@ func (app *application) handleConnection(conn net.Conn) {
 
 		switch command {
 		case protocol.CMD_CONNECTION:
-			userName := string(message.userName)
+			userName := string(message.UserName)
 			connection = app.registerConnection(userName)
-			joinMessage := fmt.Appendf(nil, "*** %s joined the chat\n", message.userName)
+			joinMessage := fmt.Appendf(nil, "*** %s joined the chat\n", message.UserName)
 			app.broadcast(userName, joinMessage)
 			go app.writeOutgoing(connection, conn)
 		case protocol.CMD_REGISTER:
@@ -127,7 +123,7 @@ func (app *application) handleConnection(conn net.Conn) {
 				app.logger.Error("chat attempted before connection established")
 				continue
 			}
-			chatMessage := fmt.Sprintf("%s: %s", message.userName, message.message)
+			chatMessage := fmt.Sprintf("%s: %s", message.UserName, message.Message)
 			app.broadcast(connection.userName, []byte(chatMessage))
 		case protocol.CMD_ROTATE_KEY:
 			if connection == nil {
@@ -184,19 +180,6 @@ func (app *application) queueMessage(channel chan []byte, userName string, msg [
 func (app *application) decryptFrame(frame []byte) ([]byte, error) {
 	// TODO: decrypt logic
 	return frame, nil
-}
-
-func (app *application) unpackFrame(packedFrame []byte) (*messageContainer, error) {
-	// TODO: Need to finish setting up the packedFrame parsing
-	userName := packedFrame[:]
-	message := packedFrame[:]
-	signature := packedFrame[:]
-	mc := &messageContainer{
-		userName:  userName,
-		message:   message,
-		signature: signature,
-	}
-	return mc, nil
 }
 
 func (app *application) registerConnection(userName string) *connection {
